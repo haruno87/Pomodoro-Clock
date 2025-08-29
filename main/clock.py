@@ -25,8 +25,8 @@ class TimerApp:
         self.root.geometry("400x400")
         self.root.resizable(False, False)
         
-        # 初始化pygame用于播放音效
-        pygame.mixer.init()
+        # 初始化pygame用于播放音效，使用更高的音质设置
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
         
         # 程序状态变量
         self.running = False
@@ -53,6 +53,8 @@ class TimerApp:
         # 尝试加载提示音
         try:
             self.alert_sound = pygame.mixer.Sound("alert.wav")
+            # 为外部音频文件设置音量
+            self.alert_sound.set_volume(1.0)
         except:
             print("警告：未找到提示音文件 'alert.wav'，将使用默认系统声音")
             # 创建一个简单的提示音作为默认
@@ -79,8 +81,8 @@ class TimerApp:
             else:  # 持续阶段
                 amplitude = 1.0
             
-            # 降低音量（最大值为80而不是127）
-            value = int(80 * amplitude * math.sin(t * frequency * 2 * math.pi))
+            # 提高音量（最大值为120而不是80）
+            value = int(120 * amplitude * math.sin(t * frequency * 2 * math.pi))
             # 居中在128
             buf[i] = 128 + value
         
@@ -364,6 +366,8 @@ class TimerApp:
     
     def _play_sound(self):
         try:
+            # 设置音量为最大值
+            self.alert_sound.set_volume(1.0)
             self.alert_sound.play()
         except Exception as e:
             print(f"播放提示音时出错: {e}")
