@@ -39,7 +39,16 @@ class TimerApp:
         self.total_run_time = 0  # 总运行时间（秒）
         self.current_interval_start_time = None  # 当前随机片段开始时间
         self.last_interval_duration = 0  # 上个随机片段的持续时间
-        self.daily_stats = self.load_daily_stats()  # 加载每日统计数据
+        
+        # 纯工作时间记录
+        self.pure_work_time = 0  # 纯工作时间（不包括暂停和休息）
+        self.work_start_time = None  # 当前工作开始时间
+        
+        self.work_sessions = []  # 记录工作时间段 [{'start': timestamp, 'end': timestamp, 'duration': seconds}]
+        self.current_work_session_start = None  # 当前工作时间段开始时间
+        self.stats_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "timer_stats.json")
+        self.daily_stats = {}  # 初始化为空字典
+        self.load_daily_stats()  # 加载每日统计数据
         
         # 创建UI元素
         self.create_widgets()
@@ -132,7 +141,7 @@ class TimerApp:
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(pady=10)
         
-        self.start_stop_button = ttk.Button(button_frame, text="启动/停止", command=self.toggle_timer, width=15)
+        self.start_stop_button = ttk.Button(button_frame, text="启动/暂停", command=self.toggle_timer, width=15)
         self.start_stop_button.pack(side=tk.LEFT, padx=5)
         
         quit_button = ttk.Button(button_frame, text="退出", command=self.quit_app, width=15)
@@ -159,27 +168,41 @@ class TimerApp:
         view_stats_button.pack(side=tk.LEFT, padx=5)
         
         # 版权信息
-        copyright_label = ttk.Label(main_frame, text="© 2023 定时提示音程序", font=("SimHei", 8))
+        copyright_label = ttk.Label(main_frame, text="© 2025 定时提示音程序", font=("SimHei", 8))
         copyright_label.pack(side=tk.BOTTOM, pady=5)
     
     def toggle_timer(self):
         if not self.running:
             self.start_timer()
         else:
-            self.stop_timer()
+            self.pause_timer()
     
     def start_timer(self):
         self.running = True
-        self.start_stop_button.config(text="停止")
+        self.start_stop_button.config(text="暂停")
         self.status_var.set("运行中")
         
-        # 记录会话开始时间
-        self.session_start_time = time.time()
-        self.current_interval_start_time = time.time()
+        # 记录工作开始时间
+        self.work_start_time = time.time()
         
-        # 重置上个片段运行时长
-        self.last_interval_duration = 0
-        self.update_last_interval_display(self.last_interval_duration)
+        # 如果是首次启动，记录会话开始时间
+        if not self.session_start_time:
+            self.session_start_time = time.time()
+            self.current_interval_start_time = time.time()
+            self.current_work_session_start = time.time()  # 记录工作时间段开始
+            # 重置上个片段运行时长
+            self.last_interval_duration = 0
+            self.update_last_interval_display(self.last_interval_duration)
+        else:
+            # 从暂停状态恢复，只更新当前片段开始时间，保持会话开始时间不变
+            # 累计之前的运行时间
+            if hasattr(self, 'pause_start_time'):
+                pause_duration = time.time() - self.pause_start_time
+                # 调整session_start_time以排除暂停时间
+                self.session_start_time += pause_duration
+                delattr(self, 'pause_start_time')
+            self.current_interval_start_time = time.time()
+            self.current_work_session_start = time.time()  # 重新开始工作时间段
         
         # 重置停止事件
         self.stop_event.clear()
@@ -189,11 +212,39 @@ class TimerApp:
         self.timer_thread.daemon = True
         self.timer_thread.start()
     
-    def stop_timer(self):
-        """停止计时器"""
+    def pause_timer(self):
+        """暂停计时器（不清空数据）"""
         if self.running:
             self.running = False
-            self.start_stop_button.config(text="启动/停止")
+            self.start_stop_button.config(text="启动/暂停")
+            self.status_var.set("已暂停")
+            self.stop_event.set()
+            
+            # 累计纯工作时间
+            if self.work_start_time:
+                self.pure_work_time += time.time() - self.work_start_time
+                self.work_start_time = None
+            
+            # 记录暂停开始时间，用于计算暂停时长
+            self.pause_start_time = time.time()
+            
+            # 记录当前工作时间段结束
+            if self.current_work_session_start:
+                work_session = {
+                    'start': self.current_work_session_start,
+                    'end': time.time(),
+                    'duration': time.time() - self.current_work_session_start
+                }
+                self.work_sessions.append(work_session)
+                self.current_work_session_start = None
+            
+            # 不更新total_run_time，保持运行时长连续性
+    
+    def stop_timer(self):
+        """完全停止计时器（用于退出时）"""
+        if self.running:
+            self.running = False
+            self.start_stop_button.config(text="启动/暂停")
             self.status_var.set("已停止")
             self.stop_event.set()
             
@@ -246,9 +297,15 @@ class TimerApp:
         while self.running and not self.stop_event.is_set():
             current_time = time.time()
             
+            # 优先检查是否完成了一个工作周期
+            if current_time >= cycle_end_time:
+                self.play_alert(3)  # 进入休息时播放三次提示音
+                self.start_break_countdown()
+                break  # 退出timer_loop，等待用户手动重新启动
+            
             # 检查是否到了提示时间
             if current_time >= next_alert_time:
-                self.play_alert()
+                self.play_alert()  # 小循环提示音播放一次
                 # 计算当前片段持续时间并保存为上个片段时长
                 if self.current_interval_start_time:
                     self.last_interval_duration = current_time - self.current_interval_start_time
@@ -261,15 +318,6 @@ class TimerApp:
                 # 重置当前随机片段开始时间
                 self.current_interval_start_time = current_time
             
-            # 检查是否完成了一个工作周期
-            if current_time >= cycle_end_time:
-                self.start_break_countdown()
-                # 重置周期
-                start_time = time.time() + self.break_duration
-                cycle_end_time = start_time + self.work_duration
-                next_alert_time = start_time + random.randint(self.min_interval, self.max_interval)
-                self.update_next_alert_display(next_alert_time)
-            
             # 更新工作/休息周期计时器（不再显示在主计时器上）
             elapsed = current_time - start_time
             # 在休息时间内不更新主计时器，保持显示当前随机片段运行时长
@@ -279,23 +327,34 @@ class TimerApp:
                 current_interval_elapsed = current_time - self.current_interval_start_time
                 self.update_timer_display(current_interval_elapsed)
             
-            # 更新程序总运行时长
-            if self.session_start_time:
-                total_elapsed = self.total_run_time + (current_time - self.session_start_time)
-                self.update_total_runtime_display(total_elapsed)
+            # 更新程序总运行时长（只计算纯工作时间）
+            if self.work_start_time:
+                current_work_time = self.pure_work_time + (current_time - self.work_start_time)
+                self.update_total_runtime_display(current_work_time)
+            else:
+                self.update_total_runtime_display(self.pure_work_time)
             
             # 短暂休眠以减少CPU使用
             time.sleep(0.1)
     
     def start_break_countdown(self):
+        # 累计纯工作时间
+        if self.work_start_time:
+            self.pure_work_time += time.time() - self.work_start_time
+            self.work_start_time = None
+        
+        # 暂停主计时器
+        self.running = False
+        self.stop_event.set()
+        
         # 进入休息倒计时
         self.status_var.set("休息时间")
         break_end_time = time.time() + self.break_duration
         
-        # 创建一个单独的倒计时标签，而不是使用主计时器标签
+        # 创建一个单独的倒计时窗口
         countdown_window = tk.Toplevel(self.root)
         countdown_window.title("休息倒计时")
-        countdown_window.geometry("300x150")
+        countdown_window.geometry("350x200")
         countdown_window.resizable(False, False)
         
         # 添加倒计时标签
@@ -306,31 +365,61 @@ class TimerApp:
         countdown_time = ttk.Label(countdown_window, textvariable=countdown_var, font=("SimHei", 24))
         countdown_time.pack(pady=10)
         
-        while self.running and not self.stop_event.is_set() and time.time() < break_end_time:
-            remaining = break_end_time - time.time()
-            if remaining <= 0:
-                break
-            
-            # 更新倒计时显示
-            hours, remainder = divmod(int(remaining), 3600)
-            minutes, seconds = divmod(remainder, 60)
-            countdown_var.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
-            
-            # 更新窗口
-            countdown_window.update()
-            
-            # 短暂休眠以减少CPU使用
-            time.sleep(0.1)
+        # 添加手动结束休息按钮
+        end_break_button = ttk.Button(countdown_window, text="结束休息", 
+                                    command=lambda: self.end_break_early(countdown_window, break_end_time))
+        end_break_button.pack(pady=10)
         
-        # 关闭倒计时窗口
+        # 休息结束标志
+        self.break_ended = False
+        
+        def update_countdown():
+            if not self.break_ended:
+                remaining = break_end_time - time.time()
+                if remaining <= 0:
+                    self.end_break_naturally(countdown_window)
+                    return
+                
+                # 更新倒计时显示
+                hours, remainder = divmod(int(remaining), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                countdown_var.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+                
+                # 继续更新
+                countdown_window.after(100, update_countdown)
+        
+        # 开始倒计时更新
+        update_countdown()
+    
+    def end_break_early(self, countdown_window, break_end_time):
+        """手动结束休息"""
+        self.break_ended = True
         countdown_window.destroy()
+        self.finish_break()
+    
+    def end_break_naturally(self, countdown_window):
+        """自然结束休息（时间到）"""
+        self.break_ended = True
+        countdown_window.destroy()
+        self.finish_break()
+    
+    def finish_break(self):
+        """休息结束后的处理"""
+        # 播放提示音三次
+        self.play_alert(3)
         
-        if self.running and not self.stop_event.is_set():
-            # 休息结束，播放提示音三次并继续下一个循环
-            self.play_alert(3)  # 连续播放三次提示音
-            self.status_var.set("休息结束，开始新的90分钟循环")
-            # 重置当前随机片段开始时间
-            self.current_interval_start_time = time.time()
+        # 更新状态为休息结束，需要手动重新启动
+        self.status_var.set("休息结束，请点击启动按钮开始新的90分钟循环")
+        
+        # 重置按钮状态
+        self.start_stop_button.config(text="启动/暂停")
+        
+        # 重置计时器显示
+        self.timer_var.set("00:00:00")
+        self.next_alert_var.set("--:--:--")
+        
+        # 不重置session_start_time，保持运行时长的连续性
+        # 休息时间不计入工作时长，但程序运行时长应该保持连续
     
     def update_timer_display(self, elapsed_seconds):
         """更新计时器显示（当前随机片段运行时长）"""
@@ -377,37 +466,90 @@ class TimerApp:
             print(f"播放提示音时出错: {e}")
     
     def quit_app(self):
-        # 停止计时器
-        self.stop_timer()
+        # 停止计时器并保存当前会话的运行时长
+        if self.running:
+            self.running = False
+            self.stop_event.set()
+            
+            # 累计纯工作时间
+            if self.work_start_time:
+                self.pure_work_time += time.time() - self.work_start_time
+                self.work_start_time = None
+            
+            # 计算并累计当前会话的运行时长
+            if self.session_start_time:
+                current_session_time = time.time() - self.session_start_time
+                self.total_run_time += current_session_time
+                
+                # 记录最后一个工作时间段
+                if self.current_work_session_start:
+                    work_session = {
+                        'start': self.current_work_session_start,
+                        'end': time.time(),
+                        'duration': time.time() - self.current_work_session_start
+                    }
+                    self.work_sessions.append(work_session)
+                    self.current_work_session_start = None
+        
         # 等待线程结束
         if self.timer_thread and self.timer_thread.is_alive():
-            self.stop_event.set()
             self.timer_thread.join(1.0)  # 等待最多1秒
-        # 保存统计数据
-        self.save_daily_stats()
+        
+        # 更新并保存每日统计数据
+        if self.total_run_time > 0 or self.alert_times:
+            self.finalize_daily_stats()
+        else:
+            self.save_daily_stats()
+        
         # 退出pygame
         pygame.mixer.quit()
         # 退出应用
         self.root.destroy()
     
     # 数据统计相关方法
+    def seconds_to_hms(self, seconds):
+        """将秒数转换为时分秒格式字符串"""
+        hours, remainder = divmod(int(seconds), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
+    def hms_to_seconds(self, hms_str):
+        """将时分秒格式字符串转换为秒数"""
+        try:
+            parts = hms_str.split(':')
+            if len(parts) == 3:
+                hours, minutes, seconds = map(int, parts)
+                return hours * 3600 + minutes * 60 + seconds
+            return 0
+        except (ValueError, AttributeError):
+            return 0
+    
     def load_daily_stats(self):
         """加载每日统计数据"""
-        stats_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "timer_stats.json")
-        if os.path.exists(stats_file):
-            try:
-                with open(stats_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"加载统计数据出错: {e}")
-                return {}
-        return {}
+        try:
+            with open(self.stats_file, "r", encoding="utf-8") as f:
+                self.daily_stats = json.load(f)
+                # 兼容旧格式：如果total_time是数字，转换为时分秒格式
+                for date, data in self.daily_stats.items():
+                    if isinstance(data.get("total_time"), (int, float)):
+                        data["total_time"] = self.seconds_to_hms(data["total_time"])
+                    # 兼容旧格式：如果work_sessions中的duration是数字，转换为时分秒格式
+                    if "work_sessions" in data:
+                        for session in data["work_sessions"]:
+                            if isinstance(session.get("duration"), (int, float)):
+                                session["duration"] = self.seconds_to_hms(session["duration"])
+        except FileNotFoundError:
+            self.daily_stats = {}
+        except json.JSONDecodeError:
+            self.daily_stats = {}
+        except Exception as e:
+            print(f"加载统计数据出错: {e}")
+            self.daily_stats = {}
     
     def save_daily_stats(self):
         """保存每日统计数据"""
-        stats_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "timer_stats.json")
         try:
-            with open(stats_file, "w", encoding="utf-8") as f:
+            with open(self.stats_file, "w", encoding="utf-8") as f:
                 json.dump(self.daily_stats, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"保存统计数据出错: {e}")
@@ -416,20 +558,73 @@ class TimerApp:
         """更新每日统计数据"""
         today = datetime.now().strftime("%Y-%m-%d")
         if today not in self.daily_stats:
-            self.daily_stats[today] = {"total_time": 0, "alert_times": []}
+            self.daily_stats[today] = {"total_time": "00:00:00", "alert_times": []}
         
-        # 更新总时间
-        self.daily_stats[today]["total_time"] = self.daily_stats[today].get("total_time", 0) + self.total_run_time
+        # 更新总时间（使用纯工作时间，转换为时分秒格式）
+        current_total_seconds = self.hms_to_seconds(self.daily_stats[today].get("total_time", "00:00:00"))
+        new_total_seconds = current_total_seconds + self.pure_work_time
+        self.daily_stats[today]["total_time"] = self.seconds_to_hms(new_total_seconds)
         
         # 更新提示时间
         for alert_time in self.alert_times:
             alert_time_str = datetime.fromtimestamp(alert_time).strftime("%H:%M:%S")
             self.daily_stats[today]["alert_times"].append(alert_time_str)
         
-        # 重置会话数据
+        # 更新工作时间段
+        if "work_sessions" not in self.daily_stats[today]:
+            self.daily_stats[today]["work_sessions"] = []
+        
+        for session in self.work_sessions:
+            session_data = {
+                'start_time': datetime.fromtimestamp(session['start']).strftime("%H:%M:%S"),
+                'end_time': datetime.fromtimestamp(session['end']).strftime("%H:%M:%S"),
+                'duration': self.seconds_to_hms(session['duration'])
+            }
+            self.daily_stats[today]["work_sessions"].append(session_data)
+        
+        # 只在程序退出时重置会话数据，其他时候保持运行时长连续性
         self.total_run_time = 0
         self.alert_times = []
+        self.work_sessions = []  # 重置工作时间段
+        # 不重置session_start_time，保持运行时长连续性
+        
+        # 保存数据
+        self.save_daily_stats()
+    
+    def finalize_daily_stats(self):
+        """程序退出时最终保存每日统计数据并重置所有会话数据"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today not in self.daily_stats:
+            self.daily_stats[today] = {"total_time": "00:00:00", "alert_times": []}
+        
+        # 更新总时间（使用纯工作时间，转换为时分秒格式）
+        current_total_seconds = self.hms_to_seconds(self.daily_stats[today].get("total_time", "00:00:00"))
+        new_total_seconds = current_total_seconds + self.pure_work_time
+        self.daily_stats[today]["total_time"] = self.seconds_to_hms(new_total_seconds)
+        
+        # 更新提示时间
+        for alert_time in self.alert_times:
+            alert_time_str = datetime.fromtimestamp(alert_time).strftime("%H:%M:%S")
+            self.daily_stats[today]["alert_times"].append(alert_time_str)
+        
+        # 更新工作时间段
+        if "work_sessions" not in self.daily_stats[today]:
+            self.daily_stats[today]["work_sessions"] = []
+        
+        for session in self.work_sessions:
+            session_data = {
+                'start_time': datetime.fromtimestamp(session['start']).strftime("%H:%M:%S"),
+                'end_time': datetime.fromtimestamp(session['end']).strftime("%H:%M:%S"),
+                'duration': self.seconds_to_hms(session['duration'])
+            }
+            self.daily_stats[today]["work_sessions"].append(session_data)
+        
+        # 程序退出时完全重置所有会话数据
+        self.total_run_time = 0
+        self.alert_times = []
+        self.work_sessions = []
         self.session_start_time = None
+        self.current_work_session_start = None
         
         # 保存数据
         self.save_daily_stats()
@@ -568,7 +763,7 @@ class TimerApp:
         history_table_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
         # 创建表格头部
-        columns = ("日期", "总运行时长", "提示次数")
+        columns = ("日期", "总运行时长", "提示次数", "工作时间段数")
         tree = ttk.Treeview(history_table_frame, columns=columns, show="headings")
         
         # 设置列宽和对齐方式
@@ -584,19 +779,25 @@ class TimerApp:
         
         # 填充历史数据
         for date, data in sorted(self.daily_stats.items(), reverse=True):
-            hours, remainder = divmod(int(data["total_time"]), 3600)
-            minutes, seconds = divmod(remainder, 60)
-            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            time_str = data.get("total_time", "00:00:00")
             alert_count = len(data.get('alert_times', []))
-            tree.insert("", tk.END, values=(date, time_str, alert_count))
+            work_session_count = len(data.get('work_sessions', []))
+            tree.insert("", tk.END, values=(date, time_str, alert_count, work_session_count))
         
         # 填充图表分析选项卡
         if len(self.daily_stats) > 0:
-            # 创建左右分栏
-            left_chart_frame = ttk.Frame(chart_frame)
+            # 创建上下分栏
+            top_chart_frame = ttk.Frame(chart_frame)
+            top_chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 5))
+            
+            bottom_chart_frame = ttk.Frame(chart_frame)
+            bottom_chart_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(5, 0))
+            
+            # 在上部分创建左右分栏
+            left_chart_frame = ttk.Frame(top_chart_frame)
             left_chart_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
             
-            right_chart_frame = ttk.Frame(chart_frame)
+            right_chart_frame = ttk.Frame(top_chart_frame)
             right_chart_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
             
             # 每日运行时长趋势图
@@ -611,7 +812,8 @@ class TimerApp:
             for date, data in sorted(self.daily_stats.items()):
                 dates.append(date)
                 # 转换为小时
-                runtimes.append(data["total_time"] / 3600)
+                total_seconds = self.hms_to_seconds(data.get("total_time", "00:00:00"))
+                runtimes.append(total_seconds / 3600)
             
             # 创建图表
             fig1, ax1 = plt.subplots(figsize=(4, 3), dpi=80)
@@ -658,6 +860,78 @@ class TimerApp:
             canvas2.draw()
             canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             plt.close(fig2)
+            
+            # 工作时间段分布图
+            work_session_frame = ttk.LabelFrame(bottom_chart_frame, text="工作时间段分布", padding=10)
+            work_session_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+            
+            # 创建工作时间段可视化
+            self.create_work_session_chart(work_session_frame)
+    
+    def create_work_session_chart(self, parent_frame):
+        """创建工作时间段分布图表"""
+        # 准备数据：收集所有工作时间段
+        all_sessions = []
+        for date, data in sorted(self.daily_stats.items()):
+            work_sessions = data.get('work_sessions', [])
+            for session in work_sessions:
+                # 解析时间
+                start_time = datetime.strptime(f"{date} {session['start_time']}", "%Y-%m-%d %H:%M:%S")
+                end_time = datetime.strptime(f"{date} {session['end_time']}", "%Y-%m-%d %H:%M:%S")
+                duration_seconds = self.hms_to_seconds(session.get('duration', '00:00:00'))
+                all_sessions.append({
+                    'date': date,
+                    'start': start_time,
+                    'end': end_time,
+                    'duration': duration_seconds
+                })
+        
+        if not all_sessions:
+            # 如果没有工作时间段数据，显示提示信息
+            ttk.Label(parent_frame, text="暂无工作时间段数据", font=("SimHei", 12)).pack(expand=True)
+            return
+        
+        # 创建图表
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 3), dpi=80)
+        
+        # 左图：每日工作时间段时间线
+        dates = sorted(list(set([s['date'] for s in all_sessions])))
+        y_positions = {date: i for i, date in enumerate(dates)}
+        
+        for session in all_sessions:
+            y_pos = y_positions[session['date']]
+            start_hour = session['start'].hour + session['start'].minute / 60
+            end_hour = session['end'].hour + session['end'].minute / 60
+            duration_hours = session['duration'] / 3600
+            
+            # 绘制时间段条形图
+            ax1.barh(y_pos, duration_hours, left=start_hour, height=0.6, 
+                    alpha=0.7, color='skyblue', edgecolor='navy')
+        
+        ax1.set_yticks(range(len(dates)))
+        ax1.set_yticklabels(dates)
+        ax1.set_xlabel('时间 (小时)')
+        ax1.set_title('每日工作时间段分布')
+        ax1.set_xlim(0, 24)
+        ax1.set_xticks(range(0, 25, 4))
+        ax1.set_xticklabels([f"{i:02d}:00" for i in range(0, 25, 4)])
+        ax1.grid(True, axis='x', linestyle='--', alpha=0.7)
+        
+        # 右图：工作时间段时长分布
+        durations = [s['duration'] / 3600 for s in all_sessions]  # 转换为小时
+        ax2.hist(durations, bins=10, alpha=0.7, color='lightgreen', edgecolor='darkgreen')
+        ax2.set_xlabel('时间段时长 (小时)')
+        ax2.set_ylabel('频次')
+        ax2.set_title('工作时间段时长分布')
+        ax2.grid(True, axis='y', linestyle='--', alpha=0.7)
+        
+        plt.tight_layout()
+        
+        # 添加到Tkinter窗口
+        canvas = FigureCanvasTkAgg(fig, master=parent_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        plt.close(fig)
 
 
 if __name__ == "__main__":
