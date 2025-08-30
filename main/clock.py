@@ -326,8 +326,8 @@ class TimerApp:
         countdown_window.destroy()
         
         if self.running and not self.stop_event.is_set():
-            # 休息结束，播放提示音并继续下一个循环
-            self.play_alert()
+            # 休息结束，播放提示音三次并继续下一个循环
+            self.play_alert(3)  # 连续播放三次提示音
             self.status_var.set("休息结束，开始新的90分钟循环")
             # 重置当前随机片段开始时间
             self.current_interval_start_time = time.time()
@@ -353,22 +353,26 @@ class TimerApp:
         minutes, seconds = divmod(remainder, 60)
         self.total_runtime_var.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
     
-    def play_alert(self):
+    def play_alert(self, repeat_count=1):
         try:
             # 记录提示时间
             alert_time = time.time()
             self.alert_times.append(alert_time)
             
             # 在单独的线程中播放提示音，避免阻塞主线程
-            threading.Thread(target=self._play_sound).start()
+            threading.Thread(target=self._play_sound, args=(repeat_count,)).start()
         except Exception as e:
             print(f"播放提示音时出错: {e}")
     
-    def _play_sound(self):
+    def _play_sound(self, repeat_count=1):
         try:
             # 设置音量为最大值
             self.alert_sound.set_volume(1.0)
-            self.alert_sound.play()
+            
+            for i in range(repeat_count):
+                self.alert_sound.play()
+                if i < repeat_count - 1:  # 如果不是最后一次播放，等待一段时间
+                    time.sleep(1.0)  # 间隔1秒
         except Exception as e:
             print(f"播放提示音时出错: {e}")
     
