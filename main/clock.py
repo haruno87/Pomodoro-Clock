@@ -285,7 +285,6 @@ class TimerApp:
     
     def timer_loop(self):
         start_time = time.time()
-        cycle_end_time = start_time + self.work_duration
         next_alert_time = start_time + random.randint(self.min_interval, self.max_interval)
         
         # 更新下一次提示时间显示
@@ -297,8 +296,17 @@ class TimerApp:
         while self.running and not self.stop_event.is_set():
             current_time = time.time()
             
-            # 优先检查是否完成了一个工作周期
-            if current_time >= cycle_end_time:
+            # 计算当前累计工作时间
+            current_total_work_time = self.pure_work_time
+            if self.work_start_time:
+                current_total_work_time += (current_time - self.work_start_time)
+            
+            # 检查是否达到90分钟的倍数（90分钟、180分钟、270分钟...）
+            current_cycle = int(current_total_work_time // self.work_duration) + 1
+            previous_cycle = int(self.pure_work_time // self.work_duration) + 1
+            
+            # 如果进入了新的90分钟周期，触发休息
+            if current_cycle > previous_cycle:
                 self.play_alert(3)  # 进入休息时播放三次提示音
                 self.start_break_countdown()
                 break  # 退出timer_loop，等待用户手动重新启动
@@ -409,7 +417,7 @@ class TimerApp:
         self.play_alert(3)
         
         # 更新状态为休息结束，需要手动重新启动
-        self.status_var.set("休息结束，请点击启动按钮开始新的90分钟循环")
+        self.status_var.set("休息结束，请点击启动按钮继续工作")
         
         # 重置按钮状态
         self.start_stop_button.config(text="启动/暂停")
@@ -418,8 +426,11 @@ class TimerApp:
         self.timer_var.set("00:00:00")
         self.next_alert_var.set("--:--:--")
         
-        # 不重置session_start_time，保持运行时长的连续性
-        # 休息时间不计入工作时长，但程序运行时长应该保持连续
+        # 不重置pure_work_time，保持累计工作时间的连续性
+        # 只重置当前工作时间段相关的变量
+        self.work_start_time = None
+        
+        # 不重置session_start_time，保持程序总运行时长的连续性
     
     def update_timer_display(self, elapsed_seconds):
         """更新计时器显示（当前随机片段运行时长）"""
